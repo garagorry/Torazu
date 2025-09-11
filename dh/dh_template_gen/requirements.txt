@@ -1,0 +1,9 @@
+# Requirements for DistroX Request Template Generator
+# Python 3.7+ required
+
+# This script uses only the Python standard library. No third-party
+# Python packages are required.
+
+# External dependency (install separately):
+# - CDP CLI (required to fetch running cluster data)
+#   Install and configure: https://docs.cloudera.com/cdp-public-cloud/cloud/cli/topics/mc-cli-install.html
