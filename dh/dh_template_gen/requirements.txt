@@ -4,6 +4,30 @@
 # This script uses only the Python standard library. No third-party
 # Python packages are required.
 
+# Standard library modules used:
+# - json: JSON parsing and generation
+# - argparse: Command-line argument parsing
+# - subprocess: CDP CLI execution
+# - sys: System-specific parameters and functions
+# - os: Operating system interface
+# - re: Regular expression operations
+# - datetime: Date and time handling
+# - pathlib: Object-oriented filesystem paths
+# - typing: Type hints support (List, Dict, Any, Optional, Union)
+# - logging: Logging functionality
+
 # External dependency (install separately):
 # - CDP CLI (required to fetch running cluster data)
 #   Install and configure: https://docs.cloudera.com/cdp-public-cloud/cloud/cli/topics/mc-cli-install.html
+
+# Features supported:
+# - Generate templates from running clusters via CDP CLI
+# - Generate templates from JSON files containing cluster descriptions
+# - Instance group overrides with node count, instance type, volumes, etc.
+# - Subnet configuration (single or multiple subnet IDs)
+# - Tag management and CLI command parsing
+# - Bucket name extraction from datalake CRN
+# - Volume type conversion (gp2 -> gp3, preserve ephemeral)
+# - Load balancer and multi-AZ configuration
+# - Comprehensive logging and error handling
+# - Timestamped output files with organized directory structure

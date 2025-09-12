@@ -16,7 +16,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,7 +29,19 @@ class DistroXRequestTemplateGenerator:
         self.cli_command_data = None
         
     def get_cluster_data_from_cli(self, cluster_name: str) -> Dict[str, Any]:
-        """Get cluster data using CDP CLI"""
+        """
+        Get cluster data using CDP CLI.
+        
+        Args:
+            cluster_name (str): Name of the cluster to describe
+            
+        Returns:
+            Dict[str, Any]: Cluster data in JSON format
+            
+        Raises:
+            subprocess.CalledProcessError: If CDP CLI command fails
+            json.JSONDecodeError: If CLI output cannot be parsed as JSON
+        """
         try:
             logger.info(f"Fetching cluster data for '{cluster_name}' using CDP CLI...")
             cmd = ["cdp", "datahub", "describe-cluster", "--cluster-name", cluster_name]
@@ -52,7 +64,19 @@ class DistroXRequestTemplateGenerator:
             raise
     
     def get_cluster_data_from_file(self, file_path: str) -> Dict[str, Any]:
-        """Get cluster data from JSON file"""
+        """
+        Get cluster data from JSON file.
+        
+        Args:
+            file_path (str): Path to the JSON file containing cluster data
+            
+        Returns:
+            Dict[str, Any]: Cluster data loaded from JSON file
+            
+        Raises:
+            FileNotFoundError: If the specified file doesn't exist
+            json.JSONDecodeError: If the file contains invalid JSON
+        """
         try:
             logger.info(f"Reading cluster data from file: {file_path}")
             with open(file_path, 'r') as f:
@@ -72,7 +96,18 @@ class DistroXRequestTemplateGenerator:
             raise
     
     def parse_cli_command_file(self, cli_file_path: str) -> Dict[str, Any]:
-        """Parse CDP CLI command file to extract additional configuration details"""
+        """
+        Parse CDP CLI command file to extract additional configuration details.
+        
+        Args:
+            cli_file_path (str): Path to file containing CDP CLI command
+            
+        Returns:
+            Dict[str, Any]: Parsed configuration data including tags, subnet ID, multi-AZ settings, etc.
+            
+        Raises:
+            FileNotFoundError: If the CLI command file doesn't exist
+        """
         try:
             logger.info(f"Reading CLI command from file: {cli_file_path}")
             with open(cli_file_path, 'r') as f:
@@ -92,7 +127,21 @@ class DistroXRequestTemplateGenerator:
             raise
     
     def _parse_cli_command(self, cli_command: str) -> Dict[str, Any]:
-        """Parse CDP CLI command string to extract configuration details"""
+        """
+        Parse CDP CLI command string to extract configuration details.
+        
+        Args:
+            cli_command (str): Raw CLI command string to parse
+            
+        Returns:
+            Dict[str, Any]: Dictionary containing extracted configuration:
+                - tags: User-defined tags
+                - subnet_id: Subnet ID if specified
+                - multi_az: Multi-AZ setting
+                - enable_load_balancer: Load balancer setting
+                - datahub_database: Database configuration
+                - instance_groups_override: Instance group overrides
+        """
         parsed = {
             "tags": {},
             "subnet_id": None,
@@ -149,8 +198,234 @@ class DistroXRequestTemplateGenerator:
         
         return parsed
     
+    def _get_bucket_name_from_datalake_crn(self, datalake_crn: Optional[str]) -> Optional[str]:
+        """
+        Get bucket name from datalake CRN using CDP CLI.
+        
+        Args:
+            datalake_crn (Optional[str]): Datalake CRN to query for bucket information
+            
+        Returns:
+            Optional[str]: S3 bucket name extracted from datalake configuration, or None if not found
+        """
+        if not datalake_crn:
+            return None
+        
+        try:
+            for arg in ["--datalake-name", "--datalake-crn"]:
+                cmd = ["cdp", "datalake", "describe-datalake", arg, datalake_crn]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                data = json.loads(result.stdout)
+                
+                if data and "datalake" in data:
+                    location = data["datalake"].get("cloudStorageBaseLocation")
+                    if location and location.startswith("s3a://"):
+                        bucket = location[6:].split("/", 1)[0]
+                        return bucket
+        except Exception as e:
+            logger.warning(f"Failed to get bucket name from datalake CRN: {e}")
+        
+        return None
+    
+    def parse_instance_groups_argument(self, instance_groups_arg: str) -> List[Dict[str, Any]]:
+        """
+        Parse the --instance-groups argument into a list of instance group configurations.
+        
+        Args:
+            instance_groups_arg (str): Space-separated string of instance group configurations
+                Format: "nodeCount=2,instanceGroupName=core,... nodeCount=1,instanceGroupName=worker,..."
+            
+        Returns:
+            List[Dict[str, Any]]: List of parsed instance group configuration dictionaries
+        """
+        import ast
+        
+        def parse_attached_volumes(val):
+            """
+            Parse attached volume configuration string.
+            
+            Args:
+                val (str): Volume configuration string in format "[{volumeSize=256,volumeCount=2,volumeType=gp3}]"
+                
+            Returns:
+                List[Dict[str, Any]]: List of volume configuration dictionaries with mapped field names
+            """
+            if not val or not val.startswith("[") or not val.endswith("]"):
+                return []
+            
+            # Replace = with : and wrap keys/values in quotes for ast.literal_eval
+            items = val[1:-1].split("},{")
+            result = []
+            for item in items:
+                item = item.strip("{}")
+                d = {}
+                for pair in item.split(","):
+                    if "=" in pair:
+                        k, v = pair.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        # Try to convert to int if possible
+                        if k in ("volumeSize", "volumeCount"):
+                            try:
+                                v = int(v)
+                            except Exception:
+                                pass
+                        d[k] = v
+                if d:
+                    # Map CLI field names to template field names
+                    mapped_volume = {}
+                    if "volumeSize" in d:
+                        mapped_volume["size"] = d["volumeSize"]
+                    if "volumeCount" in d:
+                        mapped_volume["count"] = d["volumeCount"]
+                    if "volumeType" in d:
+                        mapped_volume["type"] = d["volumeType"]
+                    if mapped_volume:
+                        result.append(mapped_volume)
+            return result
+
+        # Split by spaces, each is an instance group
+        groups = []
+        for group_str in instance_groups_arg.strip().split(" "):
+            if not group_str.strip():
+                continue
+            group = {}
+            
+            # Handle attachedVolumeConfiguration specially since it contains commas
+            # First, extract attachedVolumeConfiguration if present
+            if "attachedVolumeConfiguration=" in group_str:
+                # Find the start and end of the attachedVolumeConfiguration value
+                start_pos = group_str.find("attachedVolumeConfiguration=") + len("attachedVolumeConfiguration=")
+                
+                # Find the matching closing bracket
+                bracket_count = 0
+                end_pos = start_pos
+                for i, char in enumerate(group_str[start_pos:], start_pos):
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_pos = i + 1
+                            break
+                
+                # Extract the volume config and the rest of the string
+                volume_config_str = group_str[start_pos:end_pos]
+                before_volume = group_str[:start_pos-len("attachedVolumeConfiguration=")]
+                after_volume = group_str[end_pos:]
+                
+                # Parse the volume configuration
+                group["attachedVolumeConfiguration"] = parse_attached_volumes(volume_config_str)
+                
+                # Parse the remaining parts
+                remaining_parts = []
+                if before_volume.strip():
+                    remaining_parts.extend(before_volume.rstrip(",").split(","))
+                if after_volume.strip():
+                    remaining_parts.extend(after_volume.lstrip(",").split(","))
+                
+                # Parse remaining key=value pairs
+                for part in remaining_parts:
+                    part = part.strip()
+                    if "=" in part and part:
+                        k, v = part.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        if k == "nodeCount":
+                            try:
+                                v = int(v)
+                            except Exception:
+                                pass
+                        elif k == "rootVolumeSize":
+                            try:
+                                v = int(v)
+                            except Exception:
+                                pass
+                        elif k == "recipeNames":
+                            v = [x.strip() for x in v.split(",") if x.strip()]
+                        group[k] = v
+            else:
+                # No attachedVolumeConfiguration, parse normally
+                for pair in group_str.split(","):
+                    if "=" not in pair:
+                        continue
+                    k, v = pair.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if k == "nodeCount":
+                        try:
+                            v = int(v)
+                        except Exception:
+                            pass
+                    elif k == "rootVolumeSize":
+                        try:
+                            v = int(v)
+                        except Exception:
+                            pass
+                    elif k == "recipeNames":
+                        v = [x.strip() for x in v.split(",") if x.strip()]
+                    group[k] = v
+            
+            groups.append(group)
+        return groups
+    
+    def merge_instance_group_override(self, template_group: Dict[str, Any], override_group: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Merge a template instance group with an override group.
+        
+        Args:
+            template_group (Dict[str, Any]): Base instance group configuration from template
+            override_group (Dict[str, Any]): Override configuration to apply
+            
+        Returns:
+            Dict[str, Any]: Merged instance group configuration with overrides applied
+        """
+        merged = template_group.copy()
+        
+        logger.info(f"Overriding instance group '{template_group.get('name', 'unknown')}' with: {override_group}")
+        
+        # Map from override_group keys to template_group keys
+        key_map = {
+            "instanceGroupName": "name",
+            "nodeCount": "nodeCount",
+            "instanceGroupType": "type",
+            "instanceType": ("template", "instanceType"),
+            "attachedVolumeConfiguration": ("template", "attachedVolumes"),
+            "rootVolumeSize": ("template", "rootVolume", "size"),
+            "recipeNames": "recipeNames",
+            "recoveryMode": "recoveryMode",
+        }
+        
+        for k, v in override_group.items():
+            if k not in key_map:
+                logger.debug(f"Skipping unknown override key: {k}")
+                continue
+            mapped = key_map[k]
+            if isinstance(mapped, str):
+                logger.info(f"Setting {mapped} = {v}")
+                merged[mapped] = v
+            elif isinstance(mapped, tuple):
+                # Nested dicts
+                d = merged
+                for key in mapped[:-1]:
+                    if key not in d or not isinstance(d[key], dict):
+                        d[key] = {}
+                    d = d[key]
+                logger.info(f"Setting nested {mapped} = {v}")
+                d[mapped[-1]] = v
+        
+        return merged
+    
     def _parse_instance_groups_string(self, instance_groups_str: str) -> Dict[str, Dict[str, Any]]:
-        """Parse instance groups string from CLI command"""
+        """
+        Parse instance groups string from CLI command.
+        
+        Args:
+            instance_groups_str (str): Space-separated string of instance group configurations from CLI
+            
+        Returns:
+            Dict[str, Dict[str, Any]]: Dictionary mapping group names to their configurations
+        """
         instance_groups = {}
         
         logger.debug(f"Parsing instance groups string: {instance_groups_str}")
@@ -180,8 +455,17 @@ class DistroXRequestTemplateGenerator:
         logger.info(f"Successfully parsed {len(instance_groups)} instance groups from CLI command")
         return instance_groups
     
-    def extract_instance_group_details(self, group: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract and format instance group details"""
+    def extract_instance_group_details(self, group: Dict[str, Any], skip_cli_overrides: bool = False) -> Dict[str, Any]:
+        """
+        Extract and format instance group details.
+        
+        Args:
+            group (Dict[str, Any]): Raw instance group data from cluster description
+            skip_cli_overrides (bool): If True, skip applying CLI command overrides for instance group type
+            
+        Returns:
+            Dict[str, Any]: Formatted instance group configuration for request template
+        """
         instances = group.get("instances", [])
         first_instance = instances[0] if instances else {}
         
@@ -192,8 +476,10 @@ class DistroXRequestTemplateGenerator:
         if raw_volumes:
             for volume in raw_volumes:
                 volume_type = volume.get("volumeType", "gp3")
-                if volume_type == "ephemeral":
+                # Convert only gp2 volumes to gp3, keep ephemeral as is
+                if volume_type == "gp2":
                     volume_type = "gp3"
+                    logger.info(f"Converted volume type from gp2 to gp3")
                 
                 attached_volumes.append({
                     "size": volume.get("size", 256),
@@ -209,7 +495,7 @@ class DistroXRequestTemplateGenerator:
         
         instance_group_type = "CORE"  # Default fallback
 
-        if self.cli_command_data and self.cli_command_data.get("instance_groups_override"):
+        if not skip_cli_overrides and self.cli_command_data and self.cli_command_data.get("instance_groups_override"):
             group_name = group.get("name", "default")
             cli_group_config = self.cli_command_data["instance_groups_override"].get(group_name, {})
             logger.debug(f"Looking for group '{group_name}' in CLI command data: {cli_group_config}")
@@ -224,7 +510,10 @@ class DistroXRequestTemplateGenerator:
                 else:
                     instance_group_type = "CORE"
         else:
-            logger.debug("No CLI command data available, using fallback logic for instance group type")
+            if skip_cli_overrides:
+                logger.debug("Skipping CLI command data for instance group type due to explicit overrides")
+            else:
+                logger.debug("No CLI command data available, using fallback logic for instance group type")
             instance_type_value = first_instance.get("instanceType")
             if instance_type_value == "GATEWAY_PRIMARY":
                 instance_group_type = "GATEWAY"
@@ -258,19 +547,34 @@ class DistroXRequestTemplateGenerator:
                 "cloudPlatform": "AWS"
             },
             "recipeNames": group.get("recipes", []),
-            "subnetIds": group.get("subnetIds", []),
-            "availabilityZones": group.get("availabilityZones", [])
+            "subnetIds": group.get("subnetIds", [])
         }
     
     def extract_image_details(self, image_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract image details from cluster data"""
+        """
+        Extract image details from cluster data.
+        
+        Args:
+            image_data (Dict[str, Any]): Image information from cluster description
+            
+        Returns:
+            Dict[str, Any]: Formatted image configuration with id and catalog fields
+        """
         return {
-            "catalogName": image_data.get("catalogName", "cdp-default"),
-            "id": image_data.get("id")
+            "id": image_data.get("id"),
+            "catalog": image_data.get("catalogName", "cdp-default")
         }
     
     def extract_network_details(self, cluster_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract network configuration"""
+        """
+        Extract network configuration from cluster data.
+        
+        Args:
+            cluster_data (Dict[str, Any]): Complete cluster description data
+            
+        Returns:
+            Dict[str, Any]: Network configuration with subnetId and networkId fields
+        """
         subnet_ids = []
         if self.cli_command_data and self.cli_command_data.get("subnet_id"):
             subnet_ids = [self.cli_command_data["subnet_id"]]
@@ -281,18 +585,23 @@ class DistroXRequestTemplateGenerator:
             subnet_ids = list(dict.fromkeys(subnet_ids))
         
         return {
-            "aws": {
-                "vpcId": None,
-                "subnetIds": subnet_ids
-            }
+            "subnetId": subnet_ids[0] if subnet_ids else None,
+            "networkId": None
         }
     
     def extract_cluster_details(self, cluster_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract cluster configuration details
+        """
+        Extract cluster configuration details.
         
         Note: 
         - blueprintName is populated from workloadType since describe-cluster returns null for blueprintName
         - Only essential fields for request templates are included
+        
+        Args:
+            cluster_data (Dict[str, Any]): Complete cluster description data
+            
+        Returns:
+            Dict[str, Any]: Cluster configuration with blueprintName field
         """
         cluster_info = cluster_data.get("cluster", {})
         blueprint_name = cluster_info.get("workloadType")
@@ -300,49 +609,143 @@ class DistroXRequestTemplateGenerator:
             "blueprintName": blueprint_name
         }
     
-    def _build_tags(self, cluster_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Build tags combining CLI command tags with generated tags"""
-        tags = {
-            "userDefined": {
-                "generated-date": self.timestamp,
-                "source-cluster": cluster_info.get("clusterName", "unknown")                
-            }
+    def _build_tags(self, cluster_info: Dict[str, Any], cluster_name: str) -> Dict[str, Any]:
+        """
+        Build tags combining CLI command tags with generated tags.
+        
+        Args:
+            cluster_info (Dict[str, Any]): Cluster information from description
+            cluster_name (str): Final cluster name to use in dhname tag
+            
+        Returns:
+            Dict[str, Any]: Combined tags including generated and CLI command tags
+        """
+        user_defined_tags = {
+            "generated-date": self.timestamp,
+            "source-cluster": cluster_info.get("clusterName", "unknown"),
+            "dhname": cluster_name
         }
         
         if self.cli_command_data and self.cli_command_data.get("tags"):
             logger.debug(f"CLI command tags found: {self.cli_command_data['tags']}")
             for key, value in self.cli_command_data["tags"].items():
-                tags["userDefined"][key] = value
+                user_defined_tags[key] = value
                 logger.debug(f"Added CLI tag to template: {key} = {value}")
         else:
             logger.debug("No CLI command tags found")
         
-        return tags
+        return user_defined_tags
     
     def _get_load_balancer_setting(self, cluster_info: Dict[str, Any]) -> bool:
-        """Get load balancer setting from CLI command or default"""
+        """
+        Get load balancer setting from CLI command or default.
+        
+        Args:
+            cluster_info (Dict[str, Any]): Cluster information (currently unused)
+            
+        Returns:
+            bool: Load balancer setting from CLI command or False as default
+        """
         if self.cli_command_data and "enable_load_balancer" in self.cli_command_data:
             return self.cli_command_data["enable_load_balancer"]
         return False
     
     def _get_multi_az_setting(self, cluster_info: Dict[str, Any]) -> bool:
-        """Get multi-AZ setting from CLI command or cluster data"""
+        """
+        Get multi-AZ setting from CLI command or cluster data.
+        
+        Args:
+            cluster_info (Dict[str, Any]): Cluster information containing multiAz field
+            
+        Returns:
+            bool: Multi-AZ setting from CLI command or cluster data, defaulting to False
+        """
         if self.cli_command_data and "multi_az" in self.cli_command_data:
             return self.cli_command_data["multi_az"]
         return cluster_info.get("multiAz", False)
     
     def generate_request_template(self, cluster_data: Dict[str, Any], 
                                 cluster_name: Optional[str] = None,
-                                environment_name: Optional[str] = None) -> Dict[str, Any]:
-        """Generate the complete DistroX request template"""
+                                environment_name: Optional[str] = None,
+                                bucket_name: Optional[str] = None,
+                                datalake_name: Optional[str] = None,
+                                dh_name: Optional[str] = None,
+                                instance_groups_override: Optional[List[Dict[str, Any]]] = None,
+                                subnet_id: Optional[str] = None,
+                                subnet_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Generate the complete DistroX request template.
+        
+        Args:
+            cluster_data (Dict[str, Any]): Raw cluster description data
+            cluster_name (Optional[str]): Override cluster name (overridden by dh_name)
+            environment_name (Optional[str]): Override environment name
+            bucket_name (Optional[str]): Override S3 bucket name
+            datalake_name (Optional[str]): Override datalake name
+            dh_name (Optional[str]): Override DataHub cluster name (highest priority for cluster name)
+            instance_groups_override (Optional[List[Dict[str, Any]]]): Instance group configurations to override
+            subnet_id (Optional[str]): Single subnet ID to apply to all instance groups
+            subnet_ids (Optional[List[str]]): List of subnet IDs to apply to all instance groups
+            
+        Returns:
+            Dict[str, Any]: Complete DistroX request template in JSON format
+        """
         
         cluster_info = cluster_data.get("cluster", {})
-        final_cluster_name = cluster_name or cluster_info.get("clusterName", "generated-cluster")
+        # Priority: dh_name > cluster_name > original cluster.clusterName > fallback
+        final_cluster_name = dh_name or cluster_name or cluster_info.get("clusterName", "generated-cluster")
         final_environment_name = environment_name or cluster_info.get("environmentName", "default-environment")
         
+        # Get bucket name
+        final_bucket_name = bucket_name
+        if not final_bucket_name:
+            datalake_crn = cluster_info.get("datalakeCrn")
+            final_bucket_name = self._get_bucket_name_from_datalake_crn(datalake_crn)
+            if not final_bucket_name:
+                final_bucket_name = "customer-bucket-name"
+        
         instance_groups = []
+        skip_cli_overrides = bool(instance_groups_override)
         for group in cluster_info.get("instanceGroups", []):
-            instance_groups.append(self.extract_instance_group_details(group))
+            instance_groups.append(self.extract_instance_group_details(group, skip_cli_overrides=skip_cli_overrides))
+        
+        # Determine subnet IDs to use
+        final_subnet_ids = []
+        if subnet_ids:
+            final_subnet_ids = subnet_ids
+            logger.info(f"Using subnet IDs from --subnet-ids: {final_subnet_ids}")
+        elif subnet_id:
+            final_subnet_ids = [subnet_id]
+            logger.info(f"Using single subnet ID from --subnet-id: {final_subnet_ids}")
+        else:
+            # Use original subnet IDs from the first instance group as fallback
+            if instance_groups:
+                final_subnet_ids = instance_groups[0].get("subnetIds", [])
+                logger.info(f"Using original subnet IDs from template: {final_subnet_ids}")
+        
+        # Apply subnet IDs to all instance groups
+        if final_subnet_ids:
+            for group in instance_groups:
+                group["subnetIds"] = final_subnet_ids
+            logger.info(f"Applied subnet IDs to all instance groups: {final_subnet_ids}")
+        
+        # Apply instance groups overrides if provided
+        if instance_groups_override:
+            for override in instance_groups_override:
+                # Only override groups that match the instanceGroupName
+                if "instanceGroupName" in override:
+                    target_name = override["instanceGroupName"]
+                    # Find and override only the matching group
+                    for i, group in enumerate(instance_groups):
+                        if group.get("name") == target_name:
+                            logger.info(f"Overriding instance group '{target_name}' with CLI arguments")
+                            merged = self.merge_instance_group_override(group, override)
+                            instance_groups[i] = merged
+                            break
+                    else:
+                        logger.warning(f"No instance group found with name '{target_name}' to override")
+                else:
+                    logger.warning("Instance group override provided without instanceGroupName - skipping")
         
         image_details = None
         if "imageDetails" in cluster_info:
@@ -354,31 +757,69 @@ class DistroXRequestTemplateGenerator:
         
         request_template = {
             "environmentName": final_environment_name,
+            "name": final_cluster_name,
             "instanceGroups": instance_groups,
             "image": image_details,
             "network": network_details,
-            "cluster": cluster_details,
-            "sdx": None,
-            "externalDatabase": None,
-            "tags": self._build_tags(cluster_info),
-            "inputs": {},
+            "cluster": {
+                "databases": [],
+                "cloudStorage": {
+                    "locations": [
+                        {
+                            "type": "YARN_LOG",
+                            "value": f"s3a://{final_bucket_name}/datalake/oplogs/yarn-app-logs"
+                        },
+                        {
+                            "type": "ZEPPELIN_NOTEBOOK",
+                            "value": f"s3a://{final_bucket_name}/datalake/{final_cluster_name}/zeppelin/notebook"
+                        }
+                    ]
+                },
+                "exposedServices": ["ALL"],
+                "blueprintName": cluster_info.get("workloadType", "<unknown>"),
+                "validateBlueprint": False
+            },
+            "externalDatabase": {
+                "availabilityType": "HA"
+            },
+            "tags": {
+                "application": None,
+                "userDefined": self._build_tags(cluster_info, final_cluster_name),
+                "defaults": None
+            },
+            "inputs": {
+                "ynlogd.dirs": "/hadoopfs/fs1/nodemanager/log,/hadoopfs/fs2/nodemanager/log",
+                "ynld.dirs": "/hadoopfs/fs1/nodemanager,/hadoopfs/fs2/nodemanager",
+                "dfs.dirs": "/hadoopfs/fs3/datanode,/hadoopfs/fs4/datanode",
+                "query_data_hive_path": f"s3a://{final_bucket_name}/warehouse/tablespace/external/{final_cluster_name}/hive/sys.db/query_data",
+                "query_data_tez_path": f"s3a://{final_bucket_name}/warehouse/tablespace/external/{final_cluster_name}/hive/sys.db"
+            },
             "gatewayPort": None,
             "enableLoadBalancer": self._get_load_balancer_setting(cluster_info),
-            "variant": None,
-            "javaVersion": None,
+            "variant": "CDP",
+            "javaVersion": 8,
             "enableMultiAz": self._get_multi_az_setting(cluster_info),
-            "architecture": None,
+            "architecture": "x86_64",
             "disableDbSslEnforcement": False,
-            "security": {
-                "seLinux": cluster_info.get("security", {}).get("seLinux", "PERMISSIVE")
-            }
+            "security": cluster_info.get("security", {})
         }
         
         return request_template
     
     def save_template(self, template: Dict[str, Any], output_dir: str, 
                      cluster_name: str, source_type: str) -> str:
-        """Save the generated template to a file"""
+        """
+        Save the generated template to a file.
+        
+        Args:
+            template (Dict[str, Any]): The generated request template
+            output_dir (str): Directory where the template file should be saved
+            cluster_name (str): Name of the cluster (used in filename)
+            source_type (str): Type of source (e.g., "running-cluster", "json-file")
+            
+        Returns:
+            str: Full path to the saved template file
+        """
         
         timestamped_dir = Path(output_dir) / f"request-template-{self.timestamp}"
         timestamped_dir.mkdir(parents=True, exist_ok=True)
@@ -393,7 +834,12 @@ class DistroXRequestTemplateGenerator:
         return str(filepath)
 
 def main():
-    """Main function to handle command line arguments and execute template generation"""
+    """
+    Main function to handle command line arguments and execute template generation.
+    
+    Processes command line arguments, loads cluster data, generates request template,
+    and saves the result to a timestamped file in the specified output directory.
+    """
     
     parser = argparse.ArgumentParser(
         description="Generate DistroX request templates from running clusters or JSON files",
@@ -406,11 +852,20 @@ Examples:
   # Generate from JSON file
   python generate_request_template.py --input-file cluster_data.json --output ./templates
   
-  # Generate with custom names
-  python generate_request_template.py --cluster-name my-cluster --environment-name my-env --output ./templates
+  # Generate with custom names and bucket
+  python generate_request_template.py --cluster-name my-cluster --environment-name my-env --bucket-name my-bucket --output ./templates
+  
+  # Generate with DataHub name override
+  python generate_request_template.py --input-file cluster_data.json --dh-name my-new-dh-cluster --output ./templates
+  
+  # Generate with instance groups override and subnet IDs
+  python generate_request_template.py --cluster-name my-cluster --instance-groups "nodeCount=3,instanceGroupName=core,instanceGroupType=CORE,instanceType=m6i.4xlarge,rootVolumeSize=200" --subnet-ids subnet-123 subnet-456 --output ./templates
+  
+  # Generate with single subnet ID
+  python generate_request_template.py --cluster-name my-cluster --instance-groups "nodeCount=3,instanceGroupName=core,instanceGroupType=CORE,instanceType=m6i.4xlarge,rootVolumeSize=200" --subnet-id subnet-123 --output ./templates
   
   # Generate with CLI command file for additional configuration
-  python generate_request_template.py --input-file cluster_data.json --cli-command-file cli_command.txt --output ./templates
+  python generate_request_template.py --input-file cluster_data.json --cli-command-file cli_command.txt --bucket-name my-bucket --output ./templates
         """
     )
     
@@ -439,6 +894,38 @@ Examples:
         help="Path to file containing CDP CLI create command for additional configuration"
     )
     
+    parser.add_argument(
+        "--bucket-name", "-b",
+        help="S3 bucket name to use in the generated template"
+    )
+    
+    parser.add_argument(
+        "--datalake-name", "-d",
+        help="Override the datalake name in the template"
+    )
+    
+    parser.add_argument(
+        "--dh-name",
+        help="Override the DataHub cluster name in the template (overrides --cluster-name)"
+    )
+    
+    parser.add_argument(
+        "--instance-groups", "-i",
+        nargs='+',
+        help="Override instance groups configuration. Can specify multiple groups. Syntax: nodeCount=2,instanceGroupName=core,instanceGroupType=CORE,instanceType=m6i.4xlarge,attachedVolumeConfiguration=[{volumeSize=256,volumeCount=2,volumeType=gp3}],rootVolumeSize=200,recipeNames=recipe1,recipe2,recoveryMode=MANUAL"
+    )
+    
+    parser.add_argument(
+        "--subnet-id",
+        help="Single subnet ID to apply to all instance groups"
+    )
+    
+    parser.add_argument(
+        "--subnet-ids",
+        nargs='+',
+        help="List of subnet IDs to apply to all instance groups"
+    )
+    
     args = parser.parse_args()
     
     generator = DistroXRequestTemplateGenerator()
@@ -456,6 +943,18 @@ Examples:
         except Exception as e:
             logger.warning(f"Failed to load CLI command file: {e}")
             logger.warning("Continuing without CLI command data")
+    
+    # Parse instance groups override if provided
+    instance_groups_override = None
+    if args.instance_groups:
+        try:
+            # Join all instance group strings into one string for parsing
+            instance_groups_str = " ".join(args.instance_groups)
+            instance_groups_override = generator.parse_instance_groups_argument(instance_groups_str)
+            logger.info(f"Parsed instance groups override: {instance_groups_override}")
+        except Exception as e:
+            logger.error(f"Failed to parse instance groups argument: {e}")
+            sys.exit(1)
     
     try:
         if args.output:
@@ -480,7 +979,13 @@ Examples:
         template = generator.generate_request_template(
             cluster_data,
             cluster_name=cluster_name,
-            environment_name=args.environment_name
+            environment_name=args.environment_name,
+            bucket_name=args.bucket_name,
+            datalake_name=args.datalake_name,
+            dh_name=args.dh_name,
+            instance_groups_override=instance_groups_override,
+            subnet_id=args.subnet_id,
+            subnet_ids=args.subnet_ids
         )
         
         output_path = generator.save_template(template, output_dir, cluster_name, source_type)
