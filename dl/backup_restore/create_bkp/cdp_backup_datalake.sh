@@ -1,30 +1,25 @@
 #!/bin/bash
 
-# Enhanced CDP Datalake Backup Script
-# This script automates the process of:
-# 1. Getting the environment CRN from datalake describe
-# 2. Getting the environment name from the CRN
-# 3. Getting the backup location from the environment
-# 4. Creating a backup with validation
-
 set -e  # Exit on any error
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 --datalake-name <name> [--backup-name <name>] [--validation-only]"
-    echo "   or: $0 -d <name> [-b <name>] [--validation-only]"
+    echo "Usage: $0 --datalake-name <name> [--backup-name <name>] [--validation-only] [--max-minutes <minutes>] [--interval-seconds <seconds>]"
+    echo "   or: $0 -d <name> [-b <name>] [--validation-only] [-m <minutes>] [-i <seconds>]"
     echo ""
     echo "Arguments:"
     echo "  --datalake-name, -d    Name of the datalake to backup (required)"
     echo "  --backup-name, -b      Name for the backup (optional, defaults to datalake-name-backup-<timestamp>)"
     echo "  --validation-only      Flag to only validate the backup without creating it (optional)"
+    echo "  --max-minutes, -m      Max time to poll for status (default: 10 minutes)"
+    echo "  --interval-seconds, -i Interval between status checks (default: 5 seconds)"
     echo "  --help, -h             Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 --datalake-name jdga-it1-aw-dl"
-    echo "  $0 -d jdga-it1-aw-dl --backup-name my-backup-test"
-    echo "  $0 -d jdga-it1-aw-dl -b my-backup-test --validation-only"
-    echo "  $0 --datalake-name jdga-it1-aw-dl --validation-only"
+    echo "  $0 --datalake-name iuprocdp-sbx-01-dl"
+    echo "  $0 -d iuprocdp-sbx-01-dl --backup-name my-backup-test"
+    echo "  $0 -d iuprocdp-sbx-01-dl -b my-backup-test --validation-only"
+    echo "  $0 --datalake-name iuprocdp-sbx-01-dl --validation-only -m 15 -i 10"
     exit 1
 }
 
@@ -32,6 +27,8 @@ usage() {
 DL_NAME=""
 BACKUP_NAME=""
 VALIDATION_ONLY=false
+MAX_MINUTES=10
+INTERVAL_SECONDS=5
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -55,6 +52,22 @@ while [[ $# -gt 0 ]]; do
         --validation-only)
             VALIDATION_ONLY=true
             shift
+            ;;
+        --max-minutes|-m)
+            if [ -z "$2" ]; then
+                echo "Error: --max-minutes requires a value"
+                usage
+            fi
+            MAX_MINUTES="$2"
+            shift 2
+            ;;
+        --interval-seconds|-i)
+            if [ -z "$2" ]; then
+                echo "Error: --interval-seconds requires a value"
+                usage
+            fi
+            INTERVAL_SECONDS="$2"
+            shift 2
             ;;
         --help|-h)
             usage
@@ -83,6 +96,8 @@ echo "=========================================="
 echo "Datalake Name: $DL_NAME"
 echo "Backup Name: $BACKUP_NAME"
 echo "Validation Only: $VALIDATION_ONLY"
+echo "Max Minutes: $MAX_MINUTES"
+echo "Interval Seconds: $INTERVAL_SECONDS"
 echo "=========================================="
 
 # Step 1: Get the environment CRN from datalake describe
@@ -205,7 +220,9 @@ show_predicted_durations() {
 }
 
 # Poll for status until completion
-MAX_ATTEMPTS=60  # Maximum 60 attempts (5 minutes with 5-second intervals)
+# Compute maximum attempts based on user-configured timing
+# Ceil division: attempts = ceil((MAX_MINUTES*60)/INTERVAL_SECONDS)
+MAX_ATTEMPTS=$(( (MAX_MINUTES * 60 + INTERVAL_SECONDS - 1) / INTERVAL_SECONDS ))
 ATTEMPT=0
 STATUS=""
 
@@ -234,13 +251,13 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             if [ $ATTEMPT -eq 1 ]; then
                 show_predicted_durations "$STATUS_OUTPUT"
             fi
-            echo "Waiting 5 seconds before next check..."
-            sleep 5
+            echo "Waiting ${INTERVAL_SECONDS}s before next check..."
+            sleep "$INTERVAL_SECONDS"
             ;;
         *)
             echo "⚠️  Unknown status: $STATUS"
-            echo "Waiting 5 seconds before next check..."
-            sleep 5
+            echo "Waiting ${INTERVAL_SECONDS}s before next check..."
+            sleep "$INTERVAL_SECONDS"
             ;;
     esac
 done
