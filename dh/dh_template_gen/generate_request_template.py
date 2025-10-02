@@ -158,12 +158,16 @@ class DistroXRequestTemplateGenerator:
                 tags_str = cli_command[start_pos:next_dash].strip()
             else:
                 tags_str = cli_command[start_pos:].strip()
-            
+
             logger.debug(f"Found tags string: {tags_str}")
-            
-            tag_pairs = re.findall(r'key="([^"]+)",value="([^"]+)"', tags_str)
+
+            # Some exported CLI files may contain doubled quotes (e.g., key=""k"",value=""v"")
+            # Normalize them to single quotes to make regex parsing robust
+            normalized_tags_str = tags_str.replace('""', '"')
+
+            tag_pairs = re.findall(r'key="([^"]+)",value="([^"]+)"', normalized_tags_str)
             logger.debug(f"Parsed tag pairs: {tag_pairs}")
-            
+
             for key, value in tag_pairs:
                 parsed["tags"][key] = value
                 logger.debug(f"Added tag: {key} = {value}")
