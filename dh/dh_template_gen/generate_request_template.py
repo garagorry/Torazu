@@ -677,7 +677,8 @@ class DistroXRequestTemplateGenerator:
                                 instance_groups_override: Optional[List[Dict[str, Any]]] = None,
                                 subnet_id: Optional[str] = None,
                                 subnet_ids: Optional[List[str]] = None,
-                                java_version: int = 8) -> Dict[str, Any]:
+                                java_version: int = 8,
+                                blueprint_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Generate the complete DistroX request template.
         
@@ -692,6 +693,7 @@ class DistroXRequestTemplateGenerator:
             subnet_id (Optional[str]): Single subnet ID to apply to all instance groups
             subnet_ids (Optional[List[str]]): List of subnet IDs to apply to all instance groups
             java_version (int): Java version to use in the template (default: 8)
+            blueprint_name (Optional[str]): Override blueprint name (default: uses workloadType from cluster data)
             
         Returns:
             Dict[str, Any]: Complete DistroX request template in JSON format
@@ -782,7 +784,7 @@ class DistroXRequestTemplateGenerator:
                     ]
                 },
                 "exposedServices": ["ALL"],
-                "blueprintName": cluster_info.get("workloadType", "<unknown>"),
+                "blueprintName": blueprint_name or cluster_info.get("workloadType", "<unknown>"),
                 "validateBlueprint": False
             },
             "externalDatabase": {
@@ -875,6 +877,9 @@ Examples:
   
   # Generate with custom Java version
   python generate_request_template.py --cluster-name my-cluster --java-version 11 --output ./templates
+  
+  # Generate with custom blueprint name
+  python generate_request_template.py --cluster-name my-cluster --blueprint-name "7.2.15 - Data Mart: Apache Impala: Itau Custom" --output ./templates
         """
     )
     
@@ -942,6 +947,11 @@ Examples:
         help="Java version to use in the template (default: 8)"
     )
     
+    parser.add_argument(
+        "--blueprint-name",
+        help="Override the blueprint name in the template (default: uses workloadType from cluster data)"
+    )
+    
     args = parser.parse_args()
     
     generator = DistroXRequestTemplateGenerator()
@@ -1002,7 +1012,8 @@ Examples:
             instance_groups_override=instance_groups_override,
             subnet_id=args.subnet_id,
             subnet_ids=args.subnet_ids,
-            java_version=args.java_version
+            java_version=args.java_version,
+            blueprint_name=args.blueprint_name
         )
         
         output_path = generator.save_template(template, output_dir, cluster_name, source_type)
