@@ -82,6 +82,11 @@ python generate_request_template.py [OPTIONS]
 
 - `--cli-command-file FILE_PATH` or `-l FILE_PATH`: Path to a file containing the CDP DataHub create command exported from the CDP UI. This augments the generated template with details not returned by the describe API (e.g., tags, `--subnet-id`, `--multi-az`, `--enable-load-balancer`, `--datahub-database`, and `--instance-groups` overrides).
 
+### Runtime Configuration Options
+
+- `--java-version VERSION`: Java version to use in the template (default: 8)
+- `--blueprint-name NAME`: Override the blueprint name in the template (default: uses workloadType from cluster data)
+
 ## Execution Options
 
 ### **Option 1 – Using `--input-file` (Describe JSON Output)**
@@ -170,6 +175,29 @@ python generate_request_template.py \
   --output ./templates
 ```
 
+#### Runtime Configuration
+
+```bash
+# Use custom Java version
+python generate_request_template.py \
+  --cluster-name my-cluster \
+  --java-version 11 \
+  --output ./templates
+
+# Override blueprint name with spaces
+python generate_request_template.py \
+  --cluster-name my-cluster \
+  --blueprint-name "7.2.15 - Data Mart: Apache Impala: Itau Custom" \
+  --output ./templates
+
+# Combine Java version and blueprint name
+python generate_request_template.py \
+  --cluster-name my-cluster \
+  --java-version 17 \
+  --blueprint-name "Custom Blueprint with Spaces" \
+  --output ./templates
+```
+
 #### Complete Configuration Example
 
 ```bash
@@ -183,6 +211,8 @@ python generate_request_template.py \
     "nodeCount=1,instanceGroupName=compute,instanceGroupType=CORE,instanceType=m6i.8xlarge,attachedVolumeConfiguration=[{volumeSize=1000,volumeCount=1,volumeType=gp3}],rootVolumeSize=300" \
   --subnet-ids subnet-1234567890abcdef0 subnet-0987654321fedcba0 \
   --cli-command-file /tmp/my-cli-command.txt \
+  --java-version 11 \
+  --blueprint-name "7.2.15 - Data Mart: Apache Impala: Itau Custom" \
   --output ./templates
 ```
 
@@ -256,7 +286,7 @@ The generated template follows the `DistroXV1Request` structure with comprehensi
       ]
     },
     "exposedServices": ["ALL"],
-    "blueprintName": "7.2.17 - Data Engineering: HA: Apache Spark, Apache Hive, Apache Oozie",
+    "blueprintName": "7.2.15 - Data Mart: Apache Impala: Itau Custom",
     "validateBlueprint": false
   },
   "externalDatabase": {
@@ -281,7 +311,7 @@ The generated template follows the `DistroXV1Request` structure with comprehensi
   "gatewayPort": null,
   "enableLoadBalancer": true,
   "variant": "CDP",
-  "javaVersion": 8,
+  "javaVersion": 11,
   "enableMultiAz": false,
   "architecture": "x86_64",
   "disableDbSslEnforcement": false,
@@ -398,6 +428,12 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 - **Automatic generation**: Includes timestamp, source cluster, and dhname tags
 - **CLI integration**: Merges tags from CLI command files
 - **Consistency**: dhname tag always matches the final cluster name
+
+### Runtime Configuration
+
+- **Java Version**: Configurable Java version (default: 8) for cluster runtime
+- **Blueprint Name**: Override blueprint name with support for spaces and special characters
+- **Backward Compatibility**: Default values preserve existing behavior
 
 ## API Reference
 
