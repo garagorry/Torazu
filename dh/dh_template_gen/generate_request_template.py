@@ -676,7 +676,8 @@ class DistroXRequestTemplateGenerator:
                                 dh_name: Optional[str] = None,
                                 instance_groups_override: Optional[List[Dict[str, Any]]] = None,
                                 subnet_id: Optional[str] = None,
-                                subnet_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+                                subnet_ids: Optional[List[str]] = None,
+                                java_version: int = 8) -> Dict[str, Any]:
         """
         Generate the complete DistroX request template.
         
@@ -690,6 +691,7 @@ class DistroXRequestTemplateGenerator:
             instance_groups_override (Optional[List[Dict[str, Any]]]): Instance group configurations to override
             subnet_id (Optional[str]): Single subnet ID to apply to all instance groups
             subnet_ids (Optional[List[str]]): List of subnet IDs to apply to all instance groups
+            java_version (int): Java version to use in the template (default: 8)
             
         Returns:
             Dict[str, Any]: Complete DistroX request template in JSON format
@@ -801,7 +803,7 @@ class DistroXRequestTemplateGenerator:
             "gatewayPort": None,
             "enableLoadBalancer": self._get_load_balancer_setting(cluster_info),
             "variant": "CDP",
-            "javaVersion": 8,
+            "javaVersion": java_version,
             "enableMultiAz": self._get_multi_az_setting(cluster_info),
             "architecture": "x86_64",
             "disableDbSslEnforcement": False,
@@ -870,6 +872,9 @@ Examples:
   
   # Generate with CLI command file for additional configuration
   python generate_request_template.py --input-file cluster_data.json --cli-command-file cli_command.txt --bucket-name my-bucket --output ./templates
+  
+  # Generate with custom Java version
+  python generate_request_template.py --cluster-name my-cluster --java-version 11 --output ./templates
         """
     )
     
@@ -928,6 +933,13 @@ Examples:
         "--subnet-ids",
         nargs='+',
         help="List of subnet IDs to apply to all instance groups"
+    )
+    
+    parser.add_argument(
+        "--java-version",
+        type=int,
+        default=8,
+        help="Java version to use in the template (default: 8)"
     )
     
     args = parser.parse_args()
@@ -989,7 +1001,8 @@ Examples:
             dh_name=args.dh_name,
             instance_groups_override=instance_groups_override,
             subnet_id=args.subnet_id,
-            subnet_ids=args.subnet_ids
+            subnet_ids=args.subnet_ids,
+            java_version=args.java_version
         )
         
         output_path = generator.save_template(template, output_dir, cluster_name, source_type)
